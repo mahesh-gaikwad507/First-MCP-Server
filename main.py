@@ -2,19 +2,63 @@
 import sqlite3
 from pathlib import Path
 from datetime import date
+from typing import TypedDict
+
 from fastmcp import FastMCP
 
-# Initialize MCP server
+
+# --------------------------------------------------
+# Initialize MCP Server
+# --------------------------------------------------
+
 mcp = FastMCP("Expense Tracker MCP Server")
 
-# Database configuration
+
+# --------------------------------------------------
+# Database Configuration
+# --------------------------------------------------
+
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "expenses.db"
 
 
-# Create database and table
+# --------------------------------------------------
+# Explicit Output Schemas
+# --------------------------------------------------
+
+class Expense(TypedDict):
+    id: int
+    date: str
+    amount: float
+    category: str
+    subcategory: str
+    note: str
+
+
+class CategorySummary(TypedDict):
+    category: str
+    total: float
+    number_of_expenses: int
+
+
+class ExpenseResponse(TypedDict):
+    status: str
+    expense_id: int
+    message: str
+
+
+class DeleteResponse(TypedDict):
+    status: str
+    message: str
+
+
+# --------------------------------------------------
+# Database Setup
+# --------------------------------------------------
+
 def setup_database():
     conn = sqlite3.connect(DB_PATH)
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -32,7 +76,10 @@ def setup_database():
     conn.close()
 
 
-# Tool 1: Add an expense
+# --------------------------------------------------
+# Tool 1: Add Expense
+# --------------------------------------------------
+
 @mcp.tool()
 def add_expense(
     amount: float,
@@ -40,8 +87,10 @@ def add_expense(
     date_value: str = "",
     subcategory: str = "",
     note: str = ""
-) -> dict:
-    """Add a new expense to the expense tracker."""
+) -> ExpenseResponse:
+    """
+    Add a new expense to the expense tracker.
+    """
 
     if amount <= 0:
         raise ValueError("Amount must be greater than zero.")
@@ -49,15 +98,23 @@ def add_expense(
     expense_date = date_value or date.today().isoformat()
 
     conn = sqlite3.connect(DB_PATH)
+
     cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO expenses
         (date, amount, category, subcategory, note)
         VALUES (?, ?, ?, ?, ?)
-    """, (expense_date, amount, category, subcategory, note))
+    """, (
+        expense_date,
+        amount,
+        category,
+        subcategory,
+        note
+    ))
 
     expense_id = cursor.lastrowid
+
     conn.commit()
     conn.close()
 
@@ -68,19 +125,30 @@ def add_expense(
     }
 
 
-# Tool 2: List expenses
+# --------------------------------------------------
+# Tool 2: List Expenses
+# --------------------------------------------------
+
 @mcp.tool()
 def list_expenses(
     start_date: str = "",
     end_date: str = ""
-) -> list:
-    """List expenses, optionally filtered by a date range."""
+) -> list[Expense]:
+    """
+    List all expenses.
+
+    Optionally filter expenses using start_date
+    and end_date in YYYY-MM-DD format.
+    """
 
     conn = sqlite3.connect(DB_PATH)
+
     conn.row_factory = sqlite3.Row
+
     cursor = conn.cursor()
 
     query = "SELECT * FROM expenses WHERE 1=1"
+
     params = []
 
     if start_date:
@@ -94,18 +162,38 @@ def list_expenses(
     query += " ORDER BY date DESC"
 
     cursor.execute(query, params)
-    expenses = [dict(row) for row in cursor.fetchall()]
+
+    expenses = []
+
+    for row in cursor.fetchall():
+        expenses.append({
+            "id": row["id"],
+            "date": row["date"],
+            "amount": row["amount"],
+            "category": row["category"],
+            "subcategory": row["subcategory"] or "",
+            "note": row["note"] or ""
+        })
 
     conn.close()
+
     return expenses
 
 
-# Tool 3: Delete an expense
+# --------------------------------------------------
+# Tool 3: Delete Expense
+# --------------------------------------------------
+
 @mcp.tool()
-def delete_expense(expense_id: int) -> dict:
-    """Delete an expense using its ID."""
+def delete_expense(
+    expense_id: int
+) -> DeleteResponse:
+    """
+    Delete an expense using its unique ID.
+    """
 
     conn = sqlite3.connect(DB_PATH)
+
     cursor = conn.cursor()
 
     cursor.execute(
@@ -114,6 +202,7 @@ def delete_expense(expense_id: int) -> dict:
     )
 
     deleted = cursor.rowcount
+
     conn.commit()
     conn.close()
 
@@ -125,27 +214,38 @@ def delete_expense(expense_id: int) -> dict:
 
     return {
         "status": "success",
-        "message": "Expense deleted."
+        "message": "Expense deleted successfully."
     }
 
 
-# Tool 4: Summarize expenses by category
+# --------------------------------------------------
+# Tool 4: Summarize Expenses
+# --------------------------------------------------
+
 @mcp.tool()
 def summarize_expenses(
     start_date: str = "",
     end_date: str = ""
-) -> list:
-    """Calculate total expenses grouped by category."""
+) -> list[CategorySummary]:
+    """
+    Calculate total expenses grouped by category.
+
+    Optionally filter the summary using a date range.
+    """
 
     conn = sqlite3.connect(DB_PATH)
+
     cursor = conn.cursor()
 
     query = """
-        SELECT category, SUM(amount) AS total,
-               COUNT(*) AS number_of_expenses
+        SELECT
+            category,
+            SUM(amount) AS total,
+            COUNT(*) AS number_of_expenses
         FROM expenses
         WHERE 1=1
     """
+
     params = []
 
     if start_date:
@@ -156,28 +256,38 @@ def summarize_expenses(
         query += " AND date <= ?"
         params.append(end_date)
 
-    query += " GROUP BY category ORDER BY total DESC"
+    query += """
+        GROUP BY category
+        ORDER BY total DESC
+    """
 
     cursor.execute(query, params)
 
-    results = [
-        {
+    results = []
+
+    for row in cursor.fetchall():
+        results.append({
             "category": row[0],
             "total": row[1],
             "number_of_expenses": row[2]
-        }
-        for row in cursor.fetchall()
-    ]
+        })
 
     conn.close()
+
     return results
 
 
-# Initialize database
+# --------------------------------------------------
+# Initialize Database
+# --------------------------------------------------
+
 setup_database()
 
 
-# Run remote MCP server
+# --------------------------------------------------
+# Run MCP Server
+# --------------------------------------------------
+
 if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
