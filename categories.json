@@ -1,0 +1,87 @@
+
+{
+  "categories": [
+    {
+      "name": "Food",
+      "subcategories": [
+        "Groceries",
+        "Restaurants",
+        "Snacks",
+        "Coffee",
+        "Food Delivery"
+      ]
+    },
+    {
+      "name": "Transportation",
+      "subcategories": [
+        "Fuel",
+        "Public Transport",
+        "Taxi",
+        "Vehicle Maintenance"
+      ]
+    },
+    {
+      "name": "Shopping",
+      "subcategories": [
+        "Clothing",
+        "Electronics",
+        "Home",
+        "Personal Care"
+      ]
+    },
+    {
+      "name": "Bills",
+      "subcategories": [
+        "Electricity",
+        "Water",
+        "Internet",
+        "Mobile",
+        "Rent"
+      ]
+    },
+    {
+      "name": "Entertainment",
+      "subcategories": [
+        "Movies",
+        "Games",
+        "Subscriptions",
+        "Events"
+      ]
+    },
+    {
+      "name": "Healthcare",
+      "subcategories": [
+        "Medicines",
+        "Doctor",
+        "Hospital",
+        "Fitness"
+      ]
+    },
+    {
+      "name": "Education",
+      "subcategories": [
+        "Books",
+        "Courses",
+        "Stationery",
+        "Fees"
+      ]
+    },
+    {
+      "name": "Travel",
+      "subcategories": [
+        "Flights",
+        "Hotels",
+        "Train",
+        "Bus"
+      ]
+    },
+    {
+      "name": "Other",
+      "subcategories": [
+        "Miscellaneous",
+        "Gifts",
+        "Donations"
+      ]
+    }
+  ]
+}
