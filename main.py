@@ -1,42 +1,43 @@
 
 import os
-import sqlite3
-import tempfile
+import asyncio
+import aiosqlite
 
 from pathlib import Path
 from datetime import date
-from contextlib import closing
 from typing import TypedDict
 
 from fastmcp import FastMCP
 
 
 # --------------------------------------------------
-# Initialize MCP Server
+# 1. Initialize MCP Server
 # --------------------------------------------------
 
 mcp = FastMCP("Expense Tracker MCP Server")
 
 
 # --------------------------------------------------
-# Database Configuration
+# 2. Database Configuration
 # --------------------------------------------------
 
-# Use a writable temporary directory by default.
-# Set DATA_DIR to a persistent mounted directory
-# when deploying with persistent storage.
+# Set DATA_DIR to a persistent writable directory
+# provided by your hosting platform.
 
-DEFAULT_DATA_DIR = Path(tempfile.gettempdir()) / "expense_tracker_data"
+DB_DIR = Path(
+    os.getenv(
+        "DATA_DIR",
+        str(Path.home() / ".expense_mcp")
+    )
+)
 
-DATA_DIR = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
+DB_DIR.mkdir(parents=True, exist_ok=True)
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-DB_PATH = DATA_DIR / "expenses.db"
+DB_PATH = DB_DIR / "expenses.db"
 
 
 # --------------------------------------------------
-# Explicit Output Schemas
+# 3. Output Schemas
 # --------------------------------------------------
 
 class Expense(TypedDict):
@@ -66,36 +67,53 @@ class DeleteResponse(TypedDict):
 
 
 # --------------------------------------------------
-# Database Connection Helper
+# 4. Database Setup
 # --------------------------------------------------
 
-def get_connection():
+async def setup_database():
     """
-    Create a SQLite connection.
+    Initialize SQLite database asynchronously.
     """
 
-    conn = sqlite3.connect(
-        str(DB_PATH),
-        timeout=30
-    )
+    DB_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn.execute("PRAGMA busy_timeout = 30000")
+    async with aiosqlite.connect(str(DB_PATH)) as db:
 
-    return conn
+        await db.execute("PRAGMA busy_timeout = 30000")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                date TEXT NOT NULL,
+
+                amount REAL NOT NULL,
+
+                category TEXT NOT NULL,
+
+                subcategory TEXT DEFAULT '',
+
+                note TEXT DEFAULT ''
+
+            )
+        """)
+
+        await db.commit()
+
+    print(f"Database initialized: {DB_PATH}")
 
 
 # --------------------------------------------------
-# Date Validation Helper
+# 5. Date Validation
 # --------------------------------------------------
 
 def validate_date(date_value: str):
-    """
-    Validate date in YYYY-MM-DD format.
-    """
 
     if date_value:
         try:
             date.fromisoformat(date_value)
+
         except ValueError:
             raise ValueError(
                 "Invalid date. Use YYYY-MM-DD format."
@@ -105,47 +123,11 @@ def validate_date(date_value: str):
 
 
 # --------------------------------------------------
-# Database Setup
-# --------------------------------------------------
-
-def setup_database():
-    """
-    Create database directory and expenses table.
-    """
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    with closing(get_connection()) as conn:
-
-        with conn:
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS expenses (
-
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                    date TEXT NOT NULL,
-
-                    amount REAL NOT NULL,
-
-                    category TEXT NOT NULL,
-
-                    subcategory TEXT DEFAULT '',
-
-                    note TEXT DEFAULT ''
-
-                )
-            """)
-
-    print(f"Database initialized: {DB_PATH}")
-
-
-# --------------------------------------------------
-# Tool 1: Add Expense
+# 6. Tool: Add Expense
 # --------------------------------------------------
 
 @mcp.tool()
-def add_expense(
+async def add_expense(
     amount: float,
     category: str,
     date_value: str = "",
@@ -177,24 +159,26 @@ def add_expense(
 
     validate_date(expense_date)
 
-    with closing(get_connection()) as conn:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
 
-        with conn:
+        db.row_factory = aiosqlite.Row
 
-            cursor = conn.execute("""
-                INSERT INTO expenses
-                (date, amount, category, subcategory, note)
+        cursor = await db.execute("""
+            INSERT INTO expenses
+            (date, amount, category, subcategory, note)
 
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                expense_date,
-                amount,
-                category.strip(),
-                subcategory.strip(),
-                note.strip()
-            ))
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            expense_date,
+            amount,
+            category.strip(),
+            subcategory.strip(),
+            note.strip()
+        ))
 
-            expense_id = cursor.lastrowid
+        await db.commit()
+
+        expense_id = cursor.lastrowid
 
     return {
         "status": "success",
@@ -204,20 +188,18 @@ def add_expense(
 
 
 # --------------------------------------------------
-# Tool 2: List Expenses
+# 7. Tool: List Expenses
 # --------------------------------------------------
 
 @mcp.tool()
-def list_expenses(
+async def list_expenses(
     start_date: str = "",
     end_date: str = ""
 ) -> list[Expense]:
     """
-    List all expenses.
+    Retrieve expenses.
 
-    Optionally filter using start_date and end_date.
-
-    Date format: YYYY-MM-DD.
+    Optionally filter by date range.
     """
 
     validate_date(start_date)
@@ -225,7 +207,7 @@ def list_expenses(
 
     if start_date and end_date and start_date > end_date:
         raise ValueError(
-            "start_date cannot be after end_date."
+            "Start date cannot be after end date."
         )
 
     query = """
@@ -254,37 +236,36 @@ def list_expenses(
 
     query += " ORDER BY date DESC, id DESC"
 
-    with closing(get_connection()) as conn:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
 
-        conn.row_factory = sqlite3.Row
+        db.row_factory = aiosqlite.Row
 
-        rows = conn.execute(
-            query,
-            params
-        ).fetchall()
+        async with db.execute(query, params) as cursor:
 
-        expenses = []
+            rows = await cursor.fetchall()
 
-        for row in rows:
+    expenses = []
 
-            expenses.append({
-                "id": row["id"],
-                "date": row["date"],
-                "amount": row["amount"],
-                "category": row["category"],
-                "subcategory": row["subcategory"] or "",
-                "note": row["note"] or ""
-            })
+    for row in rows:
+
+        expenses.append({
+            "id": row["id"],
+            "date": row["date"],
+            "amount": row["amount"],
+            "category": row["category"],
+            "subcategory": row["subcategory"] or "",
+            "note": row["note"] or ""
+        })
 
     return expenses
 
 
 # --------------------------------------------------
-# Tool 3: Delete Expense
+# 8. Tool: Delete Expense
 # --------------------------------------------------
 
 @mcp.tool()
-def delete_expense(
+async def delete_expense(
     expense_id: int
 ) -> DeleteResponse:
     """
@@ -296,16 +277,16 @@ def delete_expense(
             "Expense ID must be greater than zero."
         )
 
-    with closing(get_connection()) as conn:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
 
-        with conn:
+        cursor = await db.execute(
+            "DELETE FROM expenses WHERE id = ?",
+            (expense_id,)
+        )
 
-            cursor = conn.execute(
-                "DELETE FROM expenses WHERE id = ?",
-                (expense_id,)
-            )
+        deleted = cursor.rowcount
 
-            deleted = cursor.rowcount
+        await db.commit()
 
     if deleted == 0:
 
@@ -321,18 +302,18 @@ def delete_expense(
 
 
 # --------------------------------------------------
-# Tool 4: Summarize Expenses
+# 9. Tool: Summarize Expenses
 # --------------------------------------------------
 
 @mcp.tool()
-def summarize_expenses(
+async def summarize_expenses(
     start_date: str = "",
     end_date: str = ""
 ) -> list[CategorySummary]:
     """
     Calculate total expenses grouped by category.
 
-    Optionally filter using a date range.
+    Optionally filter by date range.
     """
 
     validate_date(start_date)
@@ -340,7 +321,7 @@ def summarize_expenses(
 
     if start_date and end_date and start_date > end_date:
         raise ValueError(
-            "start_date cannot be after end_date."
+            "Start date cannot be after end date."
         )
 
     query = """
@@ -369,38 +350,32 @@ def summarize_expenses(
         ORDER BY total DESC
     """
 
-    with closing(get_connection()) as conn:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
 
-        rows = conn.execute(
-            query,
-            params
-        ).fetchall()
+        async with db.execute(query, params) as cursor:
 
-        results = []
+            rows = await cursor.fetchall()
 
-        for row in rows:
+    results = []
 
-            results.append({
-                "category": row[0],
-                "total": float(row[1]),
-                "number_of_expenses": row[2]
-            })
+    for row in rows:
+
+        results.append({
+            "category": row[0],
+            "total": float(row[1]),
+            "number_of_expenses": row[2]
+        })
 
     return results
 
 
 # --------------------------------------------------
-# Initialize Database
-# --------------------------------------------------
-
-setup_database()
-
-
-# --------------------------------------------------
-# Run MCP Server
+# 10. Initialize Database and Run Server
 # --------------------------------------------------
 
 if __name__ == "__main__":
+
+    asyncio.run(setup_database())
 
     print("Starting Expense Tracker MCP Server...")
 
