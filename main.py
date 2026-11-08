@@ -1,7 +1,11 @@
 
+import os
 import sqlite3
+import tempfile
+
 from pathlib import Path
 from datetime import date
+from contextlib import closing
 from typing import TypedDict
 
 from fastmcp import FastMCP
@@ -18,8 +22,17 @@ mcp = FastMCP("Expense Tracker MCP Server")
 # Database Configuration
 # --------------------------------------------------
 
-BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "expenses.db"
+# Use a writable temporary directory by default.
+# Set DATA_DIR to a persistent mounted directory
+# when deploying with persistent storage.
+
+DEFAULT_DATA_DIR = Path(tempfile.gettempdir()) / "expense_tracker_data"
+
+DATA_DIR = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = DATA_DIR / "expenses.db"
 
 
 # --------------------------------------------------
@@ -53,27 +66,78 @@ class DeleteResponse(TypedDict):
 
 
 # --------------------------------------------------
+# Database Connection Helper
+# --------------------------------------------------
+
+def get_connection():
+    """
+    Create a SQLite connection.
+    """
+
+    conn = sqlite3.connect(
+        str(DB_PATH),
+        timeout=30
+    )
+
+    conn.execute("PRAGMA busy_timeout = 30000")
+
+    return conn
+
+
+# --------------------------------------------------
+# Date Validation Helper
+# --------------------------------------------------
+
+def validate_date(date_value: str):
+    """
+    Validate date in YYYY-MM-DD format.
+    """
+
+    if date_value:
+        try:
+            date.fromisoformat(date_value)
+        except ValueError:
+            raise ValueError(
+                "Invalid date. Use YYYY-MM-DD format."
+            )
+
+    return date_value
+
+
+# --------------------------------------------------
 # Database Setup
 # --------------------------------------------------
 
 def setup_database():
-    conn = sqlite3.connect(DB_PATH)
+    """
+    Create database directory and expenses table.
+    """
 
-    cursor = conn.cursor()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            subcategory TEXT,
-            note TEXT
-        )
-    """)
+    with closing(get_connection()) as conn:
 
-    conn.commit()
-    conn.close()
+        with conn:
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS expenses (
+
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    date TEXT NOT NULL,
+
+                    amount REAL NOT NULL,
+
+                    category TEXT NOT NULL,
+
+                    subcategory TEXT DEFAULT '',
+
+                    note TEXT DEFAULT ''
+
+                )
+            """)
+
+    print(f"Database initialized: {DB_PATH}")
 
 
 # --------------------------------------------------
@@ -90,33 +154,47 @@ def add_expense(
 ) -> ExpenseResponse:
     """
     Add a new expense to the expense tracker.
+
+    Parameters:
+        amount: Expense amount.
+        category: Expense category.
+        date_value: Date in YYYY-MM-DD format.
+        subcategory: Optional subcategory.
+        note: Optional expense description.
     """
 
     if amount <= 0:
-        raise ValueError("Amount must be greater than zero.")
+        raise ValueError(
+            "Amount must be greater than zero."
+        )
+
+    if not category or not category.strip():
+        raise ValueError(
+            "Category cannot be empty."
+        )
 
     expense_date = date_value or date.today().isoformat()
 
-    conn = sqlite3.connect(DB_PATH)
+    validate_date(expense_date)
 
-    cursor = conn.cursor()
+    with closing(get_connection()) as conn:
 
-    cursor.execute("""
-        INSERT INTO expenses
-        (date, amount, category, subcategory, note)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        expense_date,
-        amount,
-        category,
-        subcategory,
-        note
-    ))
+        with conn:
 
-    expense_id = cursor.lastrowid
+            cursor = conn.execute("""
+                INSERT INTO expenses
+                (date, amount, category, subcategory, note)
 
-    conn.commit()
-    conn.close()
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                expense_date,
+                amount,
+                category.strip(),
+                subcategory.strip(),
+                note.strip()
+            ))
+
+            expense_id = cursor.lastrowid
 
     return {
         "status": "success",
@@ -137,17 +215,32 @@ def list_expenses(
     """
     List all expenses.
 
-    Optionally filter expenses using start_date
-    and end_date in YYYY-MM-DD format.
+    Optionally filter using start_date and end_date.
+
+    Date format: YYYY-MM-DD.
     """
 
-    conn = sqlite3.connect(DB_PATH)
+    validate_date(start_date)
+    validate_date(end_date)
 
-    conn.row_factory = sqlite3.Row
+    if start_date and end_date and start_date > end_date:
+        raise ValueError(
+            "start_date cannot be after end_date."
+        )
 
-    cursor = conn.cursor()
+    query = """
+        SELECT
+            id,
+            date,
+            amount,
+            category,
+            subcategory,
+            note
 
-    query = "SELECT * FROM expenses WHERE 1=1"
+        FROM expenses
+
+        WHERE 1=1
+    """
 
     params = []
 
@@ -159,23 +252,29 @@ def list_expenses(
         query += " AND date <= ?"
         params.append(end_date)
 
-    query += " ORDER BY date DESC"
+    query += " ORDER BY date DESC, id DESC"
 
-    cursor.execute(query, params)
+    with closing(get_connection()) as conn:
 
-    expenses = []
+        conn.row_factory = sqlite3.Row
 
-    for row in cursor.fetchall():
-        expenses.append({
-            "id": row["id"],
-            "date": row["date"],
-            "amount": row["amount"],
-            "category": row["category"],
-            "subcategory": row["subcategory"] or "",
-            "note": row["note"] or ""
-        })
+        rows = conn.execute(
+            query,
+            params
+        ).fetchall()
 
-    conn.close()
+        expenses = []
+
+        for row in rows:
+
+            expenses.append({
+                "id": row["id"],
+                "date": row["date"],
+                "amount": row["amount"],
+                "category": row["category"],
+                "subcategory": row["subcategory"] or "",
+                "note": row["note"] or ""
+            })
 
     return expenses
 
@@ -192,21 +291,24 @@ def delete_expense(
     Delete an expense using its unique ID.
     """
 
-    conn = sqlite3.connect(DB_PATH)
+    if expense_id <= 0:
+        raise ValueError(
+            "Expense ID must be greater than zero."
+        )
 
-    cursor = conn.cursor()
+    with closing(get_connection()) as conn:
 
-    cursor.execute(
-        "DELETE FROM expenses WHERE id = ?",
-        (expense_id,)
-    )
+        with conn:
 
-    deleted = cursor.rowcount
+            cursor = conn.execute(
+                "DELETE FROM expenses WHERE id = ?",
+                (expense_id,)
+            )
 
-    conn.commit()
-    conn.close()
+            deleted = cursor.rowcount
 
     if deleted == 0:
+
         return {
             "status": "error",
             "message": "Expense not found."
@@ -230,19 +332,25 @@ def summarize_expenses(
     """
     Calculate total expenses grouped by category.
 
-    Optionally filter the summary using a date range.
+    Optionally filter using a date range.
     """
 
-    conn = sqlite3.connect(DB_PATH)
+    validate_date(start_date)
+    validate_date(end_date)
 
-    cursor = conn.cursor()
+    if start_date and end_date and start_date > end_date:
+        raise ValueError(
+            "start_date cannot be after end_date."
+        )
 
     query = """
         SELECT
             category,
             SUM(amount) AS total,
             COUNT(*) AS number_of_expenses
+
         FROM expenses
+
         WHERE 1=1
     """
 
@@ -261,18 +369,22 @@ def summarize_expenses(
         ORDER BY total DESC
     """
 
-    cursor.execute(query, params)
+    with closing(get_connection()) as conn:
 
-    results = []
+        rows = conn.execute(
+            query,
+            params
+        ).fetchall()
 
-    for row in cursor.fetchall():
-        results.append({
-            "category": row[0],
-            "total": row[1],
-            "number_of_expenses": row[2]
-        })
+        results = []
 
-    conn.close()
+        for row in rows:
+
+            results.append({
+                "category": row[0],
+                "total": float(row[1]),
+                "number_of_expenses": row[2]
+            })
 
     return results
 
@@ -289,8 +401,13 @@ setup_database()
 # --------------------------------------------------
 
 if __name__ == "__main__":
+
+    print("Starting Expense Tracker MCP Server...")
+
+    print(f"Database location: {DB_PATH}")
+
     mcp.run(
         transport="streamable-http",
         host="0.0.0.0",
-        port=8000
+        port=int(os.getenv("PORT", "8000"))
     )
